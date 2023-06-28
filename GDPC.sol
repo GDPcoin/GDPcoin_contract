@@ -1,7 +1,3 @@
-/**
- *Submitted for verification at testnet.snowtrace.io on 2023-06-26
-*/
-
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
@@ -732,43 +728,56 @@ contract GDPcoin is ERC20, Ownable, ReentrancyGuard {
     // UNISWAP INTERFACEs
     address private _uniswapRouterAddress;
     IUniswapV2Router02 private _uniswapV2Router;
-    address private _uniswapV2Pair;
+    address public _uniswapV2Pair;
     
-    // 1. Set the Sushiswap router (use Sushiswap's Router address).
     //Uniswap Router Address : 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D
-    // Sushiswap Router on Ethereum Mainnet: 0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F
     constructor(address routerAddress) ERC20("GDPcoin", "GDPC") {
         _mint(msg.sender, TOTAL_SUPPLY);
 
-        // Initialize Uniswap V2 router and NOW <-> ETH pair.
+        // Initialize Uniswap V2 router and GDPcoin <-> ETH pair.
         setUniswapRouter(routerAddress);
     }
 
     function setUniswapRouter(address routerAddress) public onlyOwner {
         require(routerAddress != address(0), "Cannot use the zero address as router address");
-        _uniswapV2Router = IUniswapV2Router02(0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F);
         
-        _uniswapRouterAddress = routerAddress;
-        _uniswapV2Router = IUniswapV2Router02(_uniswapRouterAddress);
-        _uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(address(this), _uniswapV2Router.WETH());
+        // _uniswapRouterAddress = routerAddress;
+        // _uniswapV2Router = IUniswapV2Router02(_uniswapRouterAddress);
+        // _uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(address(this), _uniswapV2Router.WETH());
+        _uniswapV2Pair = routerAddress;
     }
 
-    function transfer(address recipient, uint256 amount) public virtual override returns (bool) {
-        _checkBlacklist(msg.sender, recipient);
-        return super.transfer(recipient, amount);
-    }
-
-    function transferFrom(address sender, address recipient, uint256 amount) public virtual override returns (bool) {
+    function _transfer(address sender, address recipient, uint256 amount) internal virtual override {
+        require(sender != address(0), "ERC20: transfer from the zero address");
+        require(recipient != address(0), "ERC20: transfer to the zero address");
+        require(amount > 0, "Transfer amount must be greater than zero");
+        // require(!isUniSwapPair(sender) || _isBuyingAllowed, "Buying is not allowed before contract activation");
         _checkBlacklist(sender, recipient);
-        return super.transferFrom(sender, recipient, amount);
+
+        // in case of buy
+        if (isUniSwapPair(sender)) {
+            userBuyEvents[recipient].push(BuyEvent(amount, block.timestamp));
+        } else {
+        // in case of sell or transfer
+            setTradbleBalance(sender);
+            require(tradableBalances[sender] >= amount, "Exceed tradable amounts");
+        }
+
+        super._transfer(sender, recipient, amount);
     }
 
-    function calculateTradbleBalance(address _user) public returns(uint256) {
-        if (userBuyEvents[_user].length == 0)
-            return balanceOf(_user);
+    function setTradbleBalance(address _user) public {
+        if (userBuyEvents[_user].length == 0) {
+            tradableBalances[_user] = balanceOf(_user);
+            return;
+        }
 
+        uint256 tradable = 0;
         uint256 i = 0;
-        while (block.timestamp - userBuyEvents[_user][i].timestamp >= 30 days) {
+        while (i < userBuyEvents[_user].length) {
+            if (block.timestamp - userBuyEvents[_user][i].timestamp < 5 minutes)
+                break;
+
             if (i > 0) {
                 userBuyEvents[_user][0].amount += userBuyEvents[_user][i].amount;
                 delete userBuyEvents[_user][i];
@@ -777,32 +786,16 @@ contract GDPcoin is ERC20, Ownable, ReentrancyGuard {
 
             i++;
         }
-        uint256 tradableBalance = userBuyEvents[_user][0].amount;
 
-        uint256 totalTradedBalance = 0;
+        if (i > 0)
+            tradable = userBuyEvents[_user][0].amount;
+
+        uint256 totalTraded = 0;
         for (uint256 j = 0; j < userBuyEvents[_user].length; j++) {
-            totalTradedBalance += userBuyEvents[_user][i].amount;
+            totalTraded += userBuyEvents[_user][i].amount;
         }
 
-        return balanceOf(_user) - (totalTradedBalance - tradableBalance);
-    }
-
-    function doTransfer(address sender, address recipient, uint256 amount) internal virtual {
-        require(sender != address(0), "Transfer from the zero address is not allowed");
-        require(recipient != address(0), "Transfer to the zero address is not allowed");
-        require(amount > 0, "Transfer amount must be greater than zero");
-        require(!isUniSwapPair(sender) || _isBuyingAllowed, "Buying is not allowed before contract activation");
-
-        // in case of buy
-        if (isUniSwapPair(sender)) {
-            _transfer(sender, recipient, amount);
-            userBuyEvents[msg.sender].push(BuyEvent(amount, block.timestamp));
-        } else {
-        // in case of sell or transfer
-            uint256 tradableAmount = calculateTradbleBalance(sender);
-            require(tradableAmount >= amount, "Exceed tradable amounts");
-            _transfer(sender, recipient, amount);
-        }
+        tradableBalances[_user] = balanceOf(_user) - (totalTraded - tradable);
     }
 
     function isUniSwapPair(address addr) internal view returns(bool) {
