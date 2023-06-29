@@ -1,3 +1,7 @@
+/**
+ *Submitted for verification at testnet.snowtrace.io on 2023-06-29
+*/
+
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
@@ -712,18 +716,24 @@ abstract contract ReentrancyGuard {
 
 contract GDPcoin is ERC20, Ownable, ReentrancyGuard {
     using SafeMath for uint256;
+    uint256 private constant _totalTokens = 3960000000 * (10 ** 8); // 3,960,000,000 GDPC with 8 decimals
     
-    uint256 private constant TOTAL_SUPPLY = 3960000000 * (10 ** 8); // 3,960,000,000 GDPC with 8 decimals
-    mapping(address => bool) private _blacklistedAddresses;
-
-    struct BuyEvent {
+    struct _buyEvent {
         uint256 amount;
         uint256 timestamp;
     }
 
-    mapping(address => BuyEvent[]) public userBuyEvents;
-    mapping(address => uint256) public tradableBalances;
-    bool private _isBuyingAllowed; // This is used to make sure that the contract is activated before anyone makes a purchase on PCS.  The contract will be activated once liquidity is added.
+    mapping(address => _buyEvent[]) public _userBuyEvents;
+    mapping(address => uint256) public _tradableBalances;
+    mapping(address => bool) private _blacklistedAddresses;
+
+    uint256 public _tradeDelay;
+    bool private _isBuyingAllowed;
+
+    // Presale Smart contract Address
+    address public _presaleContract;
+    bool public _presaleLock;
+    mapping(address => uint256) public _userPresaleBalances;
 
     // UNISWAP INTERFACEs
     address private _uniswapRouterAddress;
@@ -731,76 +741,103 @@ contract GDPcoin is ERC20, Ownable, ReentrancyGuard {
     address public _uniswapV2Pair;
     
     //Uniswap Router Address : 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D
+    //UniswapV2Router02 Address on Avalanche : 0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506
     constructor(address routerAddress) ERC20("GDPcoin", "GDPC") {
-        _mint(msg.sender, TOTAL_SUPPLY);
+        _mint(msg.sender, _totalTokens);
 
-        // Initialize Uniswap V2 router and GDPcoin <-> ETH pair.
+        // Initialize Uniswap V2 router and GDPC <-> ETH pair.
         setUniswapRouter(routerAddress);
+
+        // Initialize Trade Delay (Buy + Delay + Sell or Transfer)
+        _tradeDelay = 30 days;
     }
 
     function setUniswapRouter(address routerAddress) public onlyOwner {
         require(routerAddress != address(0), "Cannot use the zero address as router address");
-        
-        // _uniswapRouterAddress = routerAddress;
-        // _uniswapV2Router = IUniswapV2Router02(_uniswapRouterAddress);
-        // _uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(address(this), _uniswapV2Router.WETH());
-        _uniswapV2Pair = routerAddress;
+
+        _uniswapRouterAddress = routerAddress;
+        _uniswapV2Router = IUniswapV2Router02(_uniswapRouterAddress);
+        _uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(address(this), _uniswapV2Router.WETH());
     }
 
     function _transfer(address sender, address recipient, uint256 amount) internal virtual override {
         require(sender != address(0), "ERC20: transfer from the zero address");
         require(recipient != address(0), "ERC20: transfer to the zero address");
         require(amount > 0, "Transfer amount must be greater than zero");
-        // require(!isUniSwapPair(sender) || _isBuyingAllowed, "Buying is not allowed before contract activation");
+        require(!isUniSwapPair(sender) || _isBuyingAllowed, "Buying is not allowed before contract activation");
         _checkBlacklist(sender, recipient);
 
-        // in case of buy
-        if (isUniSwapPair(sender)) {
-            userBuyEvents[recipient].push(BuyEvent(amount, block.timestamp));
+        // in case of buy in presale. GDPC <- Presale smart contract
+        if (isPresaleContract(sender)) {
+            _userPresaleBalances[recipient] += amount;
         } else {
-        // in case of sell or transfer
-            setTradbleBalance(sender);
-            require(tradableBalances[sender] >= amount, "Exceed tradable amounts");
+            // publicsale - buy
+            if (isUniSwapPair(sender)) {
+                _userBuyEvents[recipient].push(_buyEvent(amount, block.timestamp));
+            } else {
+            // publicsale - sell or transfer
+                uint256 tradableAmount = calculateTradableBalance(sender);
+                require(tradableAmount >= amount, "Exceed tradable amounts");
+            }
         }
 
         super._transfer(sender, recipient, amount);
     }
 
-    function setTradbleBalance(address _user) public {
-        if (userBuyEvents[_user].length == 0) {
-            tradableBalances[_user] = balanceOf(_user);
+    function isTradableBuyEvent(address _user, uint256 index) private view returns(bool) {
+        return (block.timestamp - _userBuyEvents[_user][index].timestamp > _tradeDelay);
+    }
+
+    function updateTradbleBalance(address _user) private {
+        uint256 presaleBalance = _presaleLock ? _userPresaleBalances[_user] : 0;
+
+        if (_tradeDelay == 0) {
+            _tradableBalances[_user] = balanceOf(_user) - presaleBalance;
             return;
         }
 
-        uint256 tradable = 0;
-        uint256 i = 0;
-        while (i < userBuyEvents[_user].length) {
-            if (block.timestamp - userBuyEvents[_user][i].timestamp < 5 minutes)
-                break;
-
-            if (i > 0) {
-                userBuyEvents[_user][0].amount += userBuyEvents[_user][i].amount;
-                delete userBuyEvents[_user][i];
-                continue;
-            }
-
-            i++;
+        uint256 notTradable = 0;
+        for (uint256 i = 0; i < _userBuyEvents[_user].length; i++) {
+            if (!isTradableBuyEvent(_user, i))
+                notTradable += _userBuyEvents[_user][i].amount;
         }
 
-        if (i > 0)
-            tradable = userBuyEvents[_user][0].amount;
+        _tradableBalances[_user] = balanceOf(_user) - notTradable - presaleBalance;
+    }
 
-        uint256 totalTraded = 0;
-        for (uint256 j = 0; j < userBuyEvents[_user].length; j++) {
-            totalTraded += userBuyEvents[_user][i].amount;
-        }
+    function calculateTradableBalance(address _user) public view returns(uint256) {
+        uint256 presaleBalance = _presaleLock ? _userPresaleBalances[_user] : 0;
 
-        tradableBalances[_user] = balanceOf(_user) - (totalTraded - tradable);
+        if (_tradeDelay == 0)
+            return balanceOf(_user) - presaleBalance;
+        
+        uint256 notTradable = 0;
+        for (uint256 i = 0; i < _userBuyEvents[_user].length; i++) {
+            if (!isTradableBuyEvent(_user, i))
+                notTradable += _userBuyEvents[_user][i].amount;
+        }        
+
+        return balanceOf(_user) - notTradable - presaleBalance;
+    }
+
+    function setPresaleTokens(address contractAddress, bool presaleTokensLock) public onlyOwner {
+        require(contractAddress != address(0), "Cannot use the zero address as presale contract address");
+
+        _presaleContract = contractAddress;
+        _presaleLock = presaleTokensLock;
     }
 
     function isUniSwapPair(address addr) internal view returns(bool) {
         return _uniswapV2Pair == addr;
     }
+
+    function isPresaleContract(address addr) internal view returns(bool) {
+        return _presaleContract == addr;
+    }
+
+    function setTradeDelay(uint256 delay) public onlyOwner {
+        _tradeDelay = delay;
+    } 
 
     function activateBuying(bool isEnabled) public onlyOwner {
         _isBuyingAllowed = isEnabled;
