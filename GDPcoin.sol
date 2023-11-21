@@ -1,7 +1,3 @@
-/**
- *Submitted for verification at testnet.snowtrace.io on 2023-06-29
-*/
-
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
@@ -225,7 +221,7 @@ contract ERC20 is Context, IERC20, IERC20Metadata {
      * {IERC20-balanceOf} and {IERC20-transfer}.
      */
     function decimals() public view virtual override returns (uint8) {
-        return 8;
+        return 18;
     }
 
     /**
@@ -716,7 +712,7 @@ abstract contract ReentrancyGuard {
 
 contract GDPcoin is ERC20, Ownable, ReentrancyGuard {
     using SafeMath for uint256;
-    uint256 private constant _totalTokens = 3960000000 * (10 ** 8); // 3,960,000,000 GDPC with 8 decimals
+    uint256 private constant _totalTokens = 3960000000 * (10 ** 18); // 3,960,000,000 GDPC with 18 decimals
     
     struct _buyEvent {
         uint256 amount;
@@ -724,32 +720,24 @@ contract GDPcoin is ERC20, Ownable, ReentrancyGuard {
     }
 
     mapping(address => _buyEvent[]) public _userBuyEvents;
-    mapping(address => uint256) public _tradableBalances;
     mapping(address => bool) private _blacklistedAddresses;
 
     uint256 public _tradeDelay;
     bool private _isBuyingAllowed;
-
-    // Presale Smart contract Address
-    address public _presaleContract;
-    bool public _presaleLock;
-    mapping(address => uint256) public _userPresaleBalances;
 
     // UNISWAP INTERFACEs
     address private _uniswapRouterAddress;
     IUniswapV2Router02 private _uniswapV2Router;
     address public _uniswapV2Pair;
     
-    //Uniswap Router Address : 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D
-    //UniswapV2Router02 Address on Avalanche : 0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506
     constructor(address routerAddress) ERC20("GDPcoin", "GDPC") {
         _mint(msg.sender, _totalTokens);
 
-        // Initialize Uniswap V2 router and GDPC <-> ETH pair.
+        // Initialize Uniswap V2 router and GDPC <-> AVAX pair.
         setUniswapRouter(routerAddress);
 
-        // Initialize Trade Delay (Buy + Delay + Sell or Transfer)
-        _tradeDelay = 30 days;
+        // Initialize Parameters
+        _tradeDelay = 30 days; // Trade Delay (Buy + Delay + Sell or Transfer)
     }
 
     function setUniswapRouter(address routerAddress) public onlyOwner {
@@ -767,18 +755,13 @@ contract GDPcoin is ERC20, Ownable, ReentrancyGuard {
         require(!isUniSwapPair(sender) || _isBuyingAllowed, "Buying is not allowed before contract activation");
         _checkBlacklist(sender, recipient);
 
-        // in case of buy in presale. GDPC <- Presale smart contract
-        if (isPresaleContract(sender)) {
-            _userPresaleBalances[recipient] += amount;
+        // publicsale - buy
+        if (isUniSwapPair(sender)) {
+            _userBuyEvents[recipient].push(_buyEvent(amount, block.timestamp));
         } else {
-            // publicsale - buy
-            if (isUniSwapPair(sender)) {
-                _userBuyEvents[recipient].push(_buyEvent(amount, block.timestamp));
-            } else {
-            // publicsale - sell or transfer
-                uint256 tradableAmount = calculateTradableBalance(sender);
-                require(tradableAmount >= amount, "Exceed tradable amounts");
-            }
+        // publicsale - sell or transfer
+            uint256 tradableAmount = calculateTradableBalance(sender);
+            require(tradableAmount >= amount, "Exceed tradable amounts");
         }
 
         super._transfer(sender, recipient, amount);
@@ -788,28 +771,9 @@ contract GDPcoin is ERC20, Ownable, ReentrancyGuard {
         return (block.timestamp - _userBuyEvents[_user][index].timestamp > _tradeDelay);
     }
 
-    function updateTradbleBalance(address _user) private {
-        uint256 presaleBalance = _presaleLock ? _userPresaleBalances[_user] : 0;
-
-        if (_tradeDelay == 0) {
-            _tradableBalances[_user] = balanceOf(_user) - presaleBalance;
-            return;
-        }
-
-        uint256 notTradable = 0;
-        for (uint256 i = 0; i < _userBuyEvents[_user].length; i++) {
-            if (!isTradableBuyEvent(_user, i))
-                notTradable += _userBuyEvents[_user][i].amount;
-        }
-
-        _tradableBalances[_user] = balanceOf(_user) - notTradable - presaleBalance;
-    }
-
     function calculateTradableBalance(address _user) public view returns(uint256) {
-        uint256 presaleBalance = _presaleLock ? _userPresaleBalances[_user] : 0;
-
         if (_tradeDelay == 0)
-            return balanceOf(_user) - presaleBalance;
+            return balanceOf(_user);
         
         uint256 notTradable = 0;
         for (uint256 i = 0; i < _userBuyEvents[_user].length; i++) {
@@ -817,22 +781,11 @@ contract GDPcoin is ERC20, Ownable, ReentrancyGuard {
                 notTradable += _userBuyEvents[_user][i].amount;
         }        
 
-        return balanceOf(_user) - notTradable - presaleBalance;
-    }
-
-    function setPresaleTokens(address contractAddress, bool presaleTokensLock) public onlyOwner {
-        require(contractAddress != address(0), "Cannot use the zero address as presale contract address");
-
-        _presaleContract = contractAddress;
-        _presaleLock = presaleTokensLock;
+        return balanceOf(_user) - notTradable;
     }
 
     function isUniSwapPair(address addr) internal view returns(bool) {
         return _uniswapV2Pair == addr;
-    }
-
-    function isPresaleContract(address addr) internal view returns(bool) {
-        return _presaleContract == addr;
     }
 
     function setTradeDelay(uint256 delay) public onlyOwner {
